@@ -19,4 +19,5 @@ services:
       - /var/win:/storage
       - /home/fabricio/shared:/data
       - ./install:/oem
+    restart: always
     stop_grace_period: 2m

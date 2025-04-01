@@ -14,6 +14,10 @@ if [[ "$DHCP" == [Yy1]* ]]; then
   interface="$VM_NET_DEV"
 fi
 
+if [[ "${NETWORK,,}" == "user"* ]]; then
+  interface="127.0.0.1"
+fi
+
 addShare() {
   local dir="$1"
   local name="$2"
@@ -71,6 +75,9 @@ addShare() {
         echo "    guest account = nobody"
         echo "    map to guest = Bad User"
         echo "    server min protocol = NT1"
+        echo "    follow symlinks = yes"
+        echo "    wide links = yes"
+        echo "    unix extensions = no"
         echo ""
         echo "    # disable printing services"
         echo "    load printers = no"
@@ -88,6 +95,18 @@ addShare "$share" "Data" "Shared" || error "Failed to create shared folder!"
 
 [ -d "/data2" ] && addShare "/data2" "Data2" "Shared"
 [ -d "/data3" ] && addShare "/data3" "Data3" "Shared"
+
+IFS=',' read -r -a dirs <<< "${SHARES:-}"
+for dir in "${dirs[@]}"; do
+  [ ! -d "$dir" ] && continue
+  dir_name=$(basename "$dir")
+  addShare "$dir" "$dir_name" "Shared $dir_name" || error "Failed to create shared folder for $dir!"
+done
+
+# Fix Samba permissions
+[ -d /run/samba/msg.lock ] && chmod -R 0755 /run/samba/msg.lock
+[ -d /var/log/samba/cores ] && chmod -R 0700 /var/log/samba/cores
+[ -d /var/cache/samba/msg.lock ] && chmod -R 0755 /var/cache/samba/msg.lock
 
 if ! smbd; then
   error "Samba daemon failed to start!"
