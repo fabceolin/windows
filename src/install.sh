@@ -16,6 +16,7 @@ skipInstall() {
 
   if [ -f "$previous" ]; then
     previous=$(<"$previous")
+    previous="${previous//[![:print:]]/}"
     if [ -n "$previous" ]; then
       previous="$STORAGE/$previous"
       if [[ "${previous,,}" != "${iso,,}" ]]; then
@@ -75,8 +76,6 @@ startInstall() {
     fi
 
     BOOT="$STORAGE/$file"
-
-    ! migrateFiles "$BOOT" "$VERSION" && error "Migration failed!" && exit 57
 
   fi
 
@@ -202,10 +201,16 @@ abortInstall() {
 detectCustom() {
 
   local file base
+  local fname="custom.iso"
+
   CUSTOM=""
 
-  file=$(find / -maxdepth 1 -type f -iname custom.iso | head -n 1)
-  [ ! -s "$file" ] && file=$(find "$STORAGE" -maxdepth 1 -type f -iname custom.iso | head -n 1)
+  if [ -d "/$fname" ]; then
+    error "The file /$fname does not exist, please make sure that you mapped it to a valid path!" && return 1
+  fi
+
+  file=$(find / -maxdepth 1 -type f -iname "$fname" | head -n 1)
+  [ ! -s "$file" ] && file=$(find "$STORAGE" -maxdepth 1 -type f -iname "$fname" | head -n 1)
 
   if [ ! -s "$file" ] && [[ "${VERSION,,}" != "http"* ]]; then
     base=$(basename "$VERSION")
@@ -246,12 +251,12 @@ extractESD() {
   mkdir -p "$dir"
 
   size=16106127360
-  size_gb=$(( (size + 1073741823)/1073741824 ))
+  size_gb=$(formatBytes "$size")
   space=$(df --output=avail -B 1 "$dir" | tail -n 1)
-  space_gb=$(( (space + 1073741823)/1073741824 ))
+  space_gb=$(formatBytes "$space")
 
   if (( size > space )); then
-    error "Not enough free space in $STORAGE, have $space_gb GB available but need at least $size_gb GB." && return 1
+    error "Not enough free space in $STORAGE, have $space_gb available but need at least $size_gb." && return 1
   fi
 
   local esdImageCount
@@ -337,16 +342,16 @@ extractImage() {
   mkdir -p "$dir"
 
   size=$(stat -c%s "$iso")
-  size_gb=$(( (size + 1073741823)/1073741824 ))
+  size_gb=$(formatBytes "$size")
   space=$(df --output=avail -B 1 "$dir" | tail -n 1)
-  space_gb=$(( (space + 1073741823)/1073741824 ))
+  space_gb=$(formatBytes "$space")
 
   if ((size<100000000)); then
     error "Invalid ISO file: Size is smaller than 100 MB" && return 1
   fi
 
   if (( size > space )); then
-    error "Not enough free space in $STORAGE, have $space_gb GB available but need at least $size_gb GB." && return 1
+    error "Not enough free space in $STORAGE, have $space_gb available but need at least $size_gb." && return 1
   fi
 
   rm -rf "$dir"
@@ -489,6 +494,10 @@ setXML() {
 
   local file="/custom.xml"
 
+  if [ -d "$file" ]; then
+    warn "The file $file does not exist, please make sure that you mapped it to a valid path!"
+  fi
+
   [ ! -f "$file" ] || [ ! -s "$file" ] && file="$STORAGE/custom.xml"
   [ ! -f "$file" ] || [ ! -s "$file" ] && file="/run/assets/custom.xml"
   [ ! -f "$file" ] || [ ! -s "$file" ] && file="$1"
@@ -573,6 +582,10 @@ detectImage() {
   info "Detected: $desc"
   setXML "" && return 0
 
+  if [[ "$DETECTED" == "win81x86"* ]] || [[ "$DETECTED" == "win10x86"* ]]; then
+    error "The 32-bit version of $desc is not supported!" && return 1
+  fi
+
   msg="the answer file for $desc was not found ($DETECTED.xml)"
   local fallback="/run/assets/${DETECTED%%-*}.xml"
 
@@ -619,6 +632,10 @@ updateXML() {
   local asset="$1"
   local language="$2"
   local culture region user admin pass keyboard
+
+  if [ -n "${VM_NET_IP:-}" ]; then
+    sed -i "s/ 20.20.20.1 / ${VM_NET_IP%.*}.1 /g" "$asset"
+  fi
 
   [ -z "$HEIGHT" ] && HEIGHT="720"
   [ -z "$WIDTH" ] && WIDTH="1280"
@@ -668,6 +685,16 @@ updateXML() {
     sed -z "s/<AdministratorPassword>...............<Value \/>/<AdministratorPassword>\n              <Value>$admin<\/Value>/g" -i "$asset"
   fi
 
+  if [ -n "$EDITION" ]; then
+    [[ "${EDITION^^}" == "CORE" ]] && EDITION="STANDARDCORE"
+    sed -i "s/SERVERSTANDARD<\/Value>/SERVER${EDITION^^}<\/Value>/g" "$asset"
+  fi
+
+  if [ -n "$KEY" ]; then
+    sed -i '/<ProductKey>/,/<\/ProductKey>/d' "$asset"
+    sed -i "s/<\/UserData>/  <ProductKey>\n          <Key>${KEY}<\/Key>\n          <WillShowUI>OnError<\/WillShowUI>\n        <\/ProductKey>\n      <\/UserData>/g" "$asset"
+  fi
+
   return 0
 }
 
@@ -677,7 +704,12 @@ addDriver() {
   local path="$2"
   local target="$3"
   local driver="$4"
+  local desc=""
   local folder=""
+
+  if [ -z "$id" ]; then
+    warn "no Windows version specified for \"$driver\" driver!" && return 0
+  fi
 
   case "${id,,}" in
     "win7x86"* ) folder="w7/x86" ;;
@@ -698,7 +730,12 @@ addDriver() {
   esac
 
   if [ -z "$folder" ]; then
-    warn "no \"$driver\" driver found for \"$DETECTED\" !" && return 0
+    desc=$(printVersion "$id" "$id")
+    if [[ "${id,,}" != *"x86"* ]]; then
+      warn "no \"$driver\" driver available for \"$desc\" !" && return 0
+    else
+      warn "no \"$driver\" driver available for the 32-bit version of \"$desc\" !" && return 0
+    fi
   fi
 
   [ ! -d "$path/$driver/$folder" ] && return 0
@@ -730,6 +767,11 @@ addDrivers() {
 
   local msg="Adding drivers to image..."
   info "$msg" && html "$msg"
+
+  if [ -z "$version" ]; then
+    version="win11x64"
+    warn "Windows version unknown, falling back to Windows 11 drivers..."
+  fi
 
   if ! bsdtar -xf /drivers.txz -C "$drivers"; then
     error "Failed to extract drivers from archive!" && return 1
@@ -924,12 +966,12 @@ buildImage() {
   fi
 
   size=$(du -h -b --max-depth=0 "$dir" | cut -f1)
-  size_gb=$(( (size + 1073741823)/1073741824 ))
+  size_gb=$(formatBytes "$size")
   space=$(df --output=avail -B 1 "$TMP" | tail -n 1)
-  space_gb=$(( (space + 1073741823)/1073741824 ))
+  space_gb=$(formatBytes "$space")
 
   if (( size > space )); then
-    error "Not enough free space in $STORAGE, have $space_gb GB available but need at least $size_gb GB." && return 1
+    error "Not enough free space in $STORAGE, have $space_gb available but need at least $size_gb." && return 1
   fi
 
   if [[ "${BOOT_MODE,,}" != "windows_legacy" ]]; then
@@ -973,52 +1015,26 @@ bootWindows() {
 
   if [ -f "$STORAGE/windows.args" ]; then
     ARGS=$(<"$STORAGE/windows.args")
+    ARGS="${ARGS//[![:print:]]/}"
     ARGUMENTS="$ARGS ${ARGUMENTS:-}"
   fi
 
   if [ -s "$STORAGE/windows.type" ] && [ -f "$STORAGE/windows.type" ]; then
-    [ -z "${DISK_TYPE:-}" ] && DISK_TYPE=$(<"$STORAGE/windows.type")
+    if [ -z "${DISK_TYPE:-}" ]; then
+      DISK_TYPE=$(<"$STORAGE/windows.type")
+      DISK_TYPE="${DISK_TYPE//[![:print:]]/}"
+    fi
   fi
 
   if [ -s "$STORAGE/windows.mode" ] && [ -f "$STORAGE/windows.mode" ]; then
     BOOT_MODE=$(<"$STORAGE/windows.mode")
-    if [ -s "$STORAGE/windows.old" ] && [ -f "$STORAGE/windows.old" ]; then
-      [[ "${PLATFORM,,}" == "x64" ]] && MACHINE=$(<"$STORAGE/windows.old")
-    fi
-    return 0
+    BOOT_MODE="${BOOT_MODE//[![:print:]]/}"
   fi
 
-  # Migrations
-
-  [[ "${PLATFORM,,}" != "x64" ]] && return 0
-
-  if [ -f "$STORAGE/windows.old" ]; then
-    MACHINE=$(<"$STORAGE/windows.old")
-    [ -z "$MACHINE" ] && MACHINE="q35"
-    BOOT_MODE="windows_legacy"
-    echo "$BOOT_MODE" > "$STORAGE/windows.mode"
-    return 0
-  fi
-
-  local creation="1.10"
-  local minimal="2.14"
-
-  if [ -f "$STORAGE/windows.ver" ]; then
-    creation=$(<"$STORAGE/windows.ver")
-    [[ "${creation}" != *"."* ]] && creation="$minimal"
-  fi
-
-  # Force secure boot on installs created prior to v2.14
-  if (( $(echo "$creation < $minimal" | bc -l) )); then
-    if [[ "${BOOT_MODE,,}" == "windows" ]]; then
-      BOOT_MODE="windows_secure"
-      echo "$BOOT_MODE" > "$STORAGE/windows.mode"
-      if [ -f "$STORAGE/windows.rom" ] && [ ! -f "$STORAGE/$BOOT_MODE.rom" ]; then
-        mv -f "$STORAGE/windows.rom" "$STORAGE/$BOOT_MODE.rom"
-      fi
-      if [ -f "$STORAGE/windows.vars" ] && [ ! -f "$STORAGE/$BOOT_MODE.vars" ]; then
-        mv -f "$STORAGE/windows.vars" "$STORAGE/$BOOT_MODE.vars"
-      fi
+  if [ -s "$STORAGE/windows.old" ] && [ -f "$STORAGE/windows.old" ]; then
+    if [[ "${PLATFORM,,}" == "x64" ]]; then
+      MACHINE=$(<"$STORAGE/windows.old")
+      MACHINE="${MACHINE//[![:print:]]/}"
     fi
   fi
 
